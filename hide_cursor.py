@@ -1,52 +1,57 @@
 import ctypes
+import ctypes.wintypes
 import time
 import threading
-from ctypes import wintypes
+import logging
 
-# Constants
-USER32 = ctypes.windll.user32
-CURSOR_SHOWING = 0x00000001
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Constants and structures
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+# Load required DLLs
+user32 = ctypes.windll.user32
 
 # Function prototypes
-GetCursorPos = USER32.GetCursorPos
-ShowCursor = USER32.ShowCursor
-GetCursorInfo = USER32.GetCursorInfo
+user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+user32.SetSystemCursor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 
+# Constants
+OCR_NORMAL = 32512
+SPI_SETCURSORS = 0x0057
+SPIF_UPDATEINIFILE = 0x01
+SPIF_SENDCHANGE = 0x02
 
-class CURSORINFO(ctypes.Structure):
-    _fields_ = [
-        ('cbSize', ctypes.c_uint),
-        ('flags', ctypes.c_uint),
-        ('hCursor', ctypes.c_void_p),
-        ('ptScreenPos', ctypes.wintypes.POINT),
-    ]
-
-
-def get_cursor_pos() -> tuple[int, int]:
+def get_cursor_pos():
     """Get the current position of the cursor."""
-    pt = wintypes.POINT()
-    GetCursorPos(ctypes.byref(pt))
-    return pt.x, pt.y
+    pt = POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    return (pt.x, pt.y)
 
+def create_invisible_cursor():
+    """Create an invisible cursor."""
+    # Create a 1x1 pixel black cursor
+    cursor = user32.CreateCursor(None, 0, 0, 1, 1, bytes([0]), bytes([0]))
+    return cursor
 
-def show_cursor(show: bool) -> int:
-    """Show or hide the cursor based on the 'show' parameter"""
-    return ShowCursor(show)
+def set_system_cursor(cursor, cursor_id=OCR_NORMAL):
+    """Set the system cursor to the specified cursor."""
+    user32.SetSystemCursor(cursor, cursor_id)
 
+def restore_system_cursors():
+    """Restore the system cursors to their default appearance."""
+    user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
 
-def is_cursor_showing() -> bool:
-    """Check if the cursor is currently visible."""
-    ci = CURSORINFO()
-    ci.cbSize = ctypes.sizeof(CURSORINFO)
-    GetCursorInfo(ctypes.byref(ci))
-    return bool(ci.flags & CURSOR_SHOWING)
-
-
-def hide_cursor_after_timeout(timeout: int = 3) -> None:
+def hide_cursor_after_timeout(timeout=3):
     """Hide the cursor after a specified timeout of inactivity."""
     last_pos = get_cursor_pos()
-    cursor_hidden = False
     last_move_time = time.time()
+    cursor_hidden = False
+    invisible_cursor = create_invisible_cursor()
+
+    logging.debug("Starting cursor hide thread")
 
     while True:
         time.sleep(0.1)
@@ -54,17 +59,18 @@ def hide_cursor_after_timeout(timeout: int = 3) -> None:
 
         if current_pos != last_pos:
             if cursor_hidden:
-                show_cursor(True)
+                restore_system_cursors()
+                logging.debug("Cursor shown")
                 cursor_hidden = False
             last_pos = current_pos
             last_move_time = time.time()
-
+            logging.debug(f"Cursor moved to {current_pos}")
         elif not cursor_hidden and time.time() - last_move_time > timeout:
-            show_cursor(False)
+            set_system_cursor(invisible_cursor)
+            logging.debug("Cursor hidden")
             cursor_hidden = True
 
-
-def main() -> None:
+def main():
     """Main function to start the cursor hiding utility."""
     cursor_thread = threading.Thread(target=hide_cursor_after_timeout, daemon=True)
     cursor_thread.start()
@@ -73,8 +79,10 @@ def main() -> None:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        pass
-
+        logging.debug("Script terminated by user")
+    finally:
+        restore_system_cursors()
+        logging.debug("System cursors restored")
 
 if __name__ == "__main__":
     main()
