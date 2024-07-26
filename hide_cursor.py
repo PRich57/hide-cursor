@@ -15,9 +15,9 @@ GetCursorInfo = USER32.GetCursorInfo
 
 class CURSORINFO(ctypes.Structure):
     _fields_ = [
-        ('cbSize', ctypes.c_unit),
-        ('flags', ctypes.c_unit),
-        ('hCursor', ctypes.wintypes.HCURSOR),
+        ('cbSize', ctypes.c_uint),
+        ('flags', ctypes.c_uint),
+        ('hCursor', ctypes.c_void_p),
         ('ptScreenPos', ctypes.wintypes.POINT),
     ]
 
