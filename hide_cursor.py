@@ -1,22 +1,9 @@
 import ctypes
-import ctypes.wintypes
-import time
-import threading
 import logging
+import threading
+import time
+from ctypes import wintypes
 
-# Set up logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Constants and structures
-class POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-# Load required DLLs
-user32 = ctypes.windll.user32
-
-# Function prototypes
-user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
-user32.SetSystemCursor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 
 # Constants
 OCR_NORMAL = 32512
@@ -24,54 +11,117 @@ SPI_SETCURSORS = 0x0057
 SPIF_UPDATEINIFILE = 0x01
 SPIF_SENDCHANGE = 0x02
 
-def get_cursor_pos():
-    """Get the current position of the cursor."""
-    pt = POINT()
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Load required DLLs
+user32 = ctypes.windll.user32
+
+# Function prototypes
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+user32.SetSystemCursor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+user32.SetSystemCursor.restype = ctypes.c_bool
+user32.CopyIcon.argtypes = [ctypes.c_void_p]
+user32.CopyIcon.restype = ctypes.c_void_p
+user32.LoadCursorW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+user32.LoadCursorW.restype = ctypes.c_void_p
+user32.SystemParametersInfoW.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+user32.SystemParametersInfoW.restype = ctypes.c_bool
+
+
+def get_cursor_pos() -> tuple[int, int]:
+    """
+    Get the current position of the cursor.
+
+    Returns:
+        A tuple containing the x and y coordinates of the cursor.
+    """
+    pt = wintypes.POINT()
     user32.GetCursorPos(ctypes.byref(pt))
-    return (pt.x, pt.y)
+    return pt.x, pt.y
 
-def create_invisible_cursor():
-    """Create an invisible cursor."""
-    # Create a 1x1 pixel black cursor
-    cursor = user32.CreateCursor(None, 0, 0, 1, 1, bytes([0]), bytes([0]))
-    return cursor
 
-def set_system_cursor(cursor, cursor_id=OCR_NORMAL):
-    """Set the system cursor to the specified cursor."""
-    user32.SetSystemCursor(cursor, cursor_id)
+def create_invisible_cursor() -> ctypes.c_void_p:
+    """
+    Create an invisible cursor.
 
-def restore_system_cursors():
-    """Restore the system cursors to their default appearance."""
-    user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
+    Returns:
+        A handle to the created invisible cursor.
+    """
+    and_mask = (ctypes.c_ubyte * 4)(0xFF, 0xFF, 0xFF, 0xFF)
+    xor_mask = (ctypes.c_ubyte * 4)(0, 0, 0, 0)
+    return user32.CreateCursor(None, 0, 0, 1, 1, and_mask, xor_mask)
 
-def hide_cursor_after_timeout(timeout=3):
-    """Hide the cursor after a specified timeout of inactivity."""
+
+original_cursor = None
+
+
+def hide_cursor() -> None:
+    """
+    Hide the cursor by replacing it with an invisible one.
+    """
+    global original_cursor
+    invisible_cursor = create_invisible_cursor()
+    original_cursor = user32.CopyIcon(user32.LoadCursorW(None, OCR_NORMAL))
+    if user32.SetSystemCursor(invisible_cursor, OCR_NORMAL):
+        logger.debug("Cursor hidden")
+    else:
+        logger.error("Failed to hide cursor")
+
+
+def show_cursor() -> None:
+    """
+    Restore the original cursor.
+    """
+    global original_cursor
+    if original_cursor:
+        if user32.SetSystemCursor(original_cursor, OCR_NORMAL):
+            logger.debug("Cursor restored")
+            # Force a cursor update across all monitors
+            user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
+        else:
+            logger.error("Failed to restore cursor")
+    else:
+        logger.error("No original cursor to restore")
+
+
+def hide_cursor_after_timeout(timeout: int = 3) -> None:
+    """
+    Hide the cursor after a specified timeout of inactivity.
+
+    Args:
+        timeout: Number of seconds of inactivity before hiding the cursor.
+    """
     last_pos = get_cursor_pos()
     last_move_time = time.time()
     cursor_hidden = False
-    invisible_cursor = create_invisible_cursor()
 
-    logging.debug("Starting cursor hide thread")
+    logger.debug("Starting cursor hide thread")
 
     while True:
         time.sleep(0.1)
         current_pos = get_cursor_pos()
 
         if current_pos != last_pos:
-            if cursor_hidden:
-                restore_system_cursors()
-                logging.debug("Cursor shown")
-                cursor_hidden = False
             last_pos = current_pos
             last_move_time = time.time()
-            logging.debug(f"Cursor moved to {current_pos}")
+            if cursor_hidden:
+                show_cursor()
+                cursor_hidden = False
+            logger.debug(f"Cursor moved to {current_pos}")
         elif not cursor_hidden and time.time() - last_move_time > timeout:
-            set_system_cursor(invisible_cursor)
-            logging.debug("Cursor hidden")
+            hide_cursor()
             cursor_hidden = True
 
-def main():
-    """Main function to start the cursor hiding utility."""
+
+def main() -> None:
+    """
+    Main function to start the cursor hiding utility.
+
+    This function sets up a daemon thread to handle cursor hiding and runs
+    indefinitely until interrupted by the user.
+    """
     cursor_thread = threading.Thread(target=hide_cursor_after_timeout, daemon=True)
     cursor_thread.start()
 
@@ -79,10 +129,12 @@ def main():
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        logging.debug("Script terminated by user")
+        logger.debug("Script terminated by user")
     finally:
-        restore_system_cursors()
-        logging.debug("System cursors restored")
+        # Ensure cursor is shown when the script exits
+        show_cursor()
+        logger.debug("Cursor shown on exit")
+
 
 if __name__ == "__main__":
     main()
